@@ -135,5 +135,5 @@ void loop() {
   // Serial.print(",");
   // Serial.println(csRawAverage, 3);
 
-  delay(0); // Pause between readings; actual logging rate is below 1 kHz.
+  delay(0); // No pause; the loop samples as fast as it can run.
 }

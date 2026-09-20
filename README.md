@@ -27,10 +27,10 @@ pio run
 pio run --target upload
 
 # Open Serial Monitor
-pio device monitor --baud 115200
+pio device monitor --baud 921600
 ```
 
 ### Usage
-1. Open the Serial Monitor at 115200 baud.
-2. Send `'s'` over the serial connection to initiate the 5-second motor test run.
+1. Open the Serial Monitor at 921600 baud.
+2. Send `'s'` over the serial connection to initiate the 200 ms motor test run.
 3. The serial monitor streams timestamp, encoder count, calculated speed, and current-sense data.
