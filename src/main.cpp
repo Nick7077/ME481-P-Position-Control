@@ -30,7 +30,7 @@ constexpr int CS_RAW_SAMPLES = 256;
 float csOffset_mV = 0.0f;
 
 // ---------------- Run control ----------------
-constexpr unsigned long RUN_DURATION_MS = 100; // how long the motor runs once started
+constexpr unsigned long RUN_DURATION_MS = 200; // how long the motor runs once started
 constexpr char START_CHAR = 's'; // send this over serial to start the motor
 
 bool motorRunning = false;
@@ -65,7 +65,7 @@ float readMotorCurrent_A() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
 
   // Encoder
   ESP32Encoder::useInternalWeakPullResistors = puType::up;
@@ -135,5 +135,5 @@ void loop() {
   // Serial.print(",");
   // Serial.println(csRawAverage, 3);
 
-  delay(1); // Pause between readings; actual logging rate is below 1 kHz.
+  delay(0); // Pause between readings; actual logging rate is below 1 kHz.
 }
