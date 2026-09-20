@@ -15,7 +15,7 @@ constexpr int ENCODER_B = 27;
 constexpr int PWM_FREQ = 20000;
 constexpr int PWM_BITS = 8;
 constexpr int PWM_CHANNEL = 0;
-constexpr int TEST_PWM = 255; // 100% duty cycle
+constexpr int TEST_PWM = 150;
 
 // ---------------- Current-sense configuration ----------------
 // VNH5019 datasheet: CS output is ~140 mV per amp of motor current while driving.
@@ -30,7 +30,7 @@ constexpr int CS_RAW_SAMPLES = 256;
 float csOffset_mV = 0.0f;
 
 // ---------------- Run control ----------------
-constexpr unsigned long RUN_DURATION_MS = 5000; // how long the motor runs once started
+constexpr unsigned long RUN_DURATION_MS = 100; // how long the motor runs once started
 constexpr char START_CHAR = 's'; // send this over serial to start the motor
 
 bool motorRunning = false;
@@ -135,5 +135,5 @@ void loop() {
   // Serial.print(",");
   // Serial.println(csRawAverage, 3);
 
-  delay(10); // Pause between readings; actual logging rate is below 100 Hz.
+  delay(1); // Pause between readings; actual logging rate is below 1 kHz.
 }
