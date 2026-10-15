@@ -22,3 +22,6 @@ backup/
 
 # PDF documents
 *.pdf
+
+# Serial monitor logs (log2file filter)
+logs/
