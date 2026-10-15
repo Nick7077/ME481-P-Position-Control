@@ -16,134 +16,150 @@ constexpr int ENCODER_B = 27;
 // ============================================================
 // PWM configuration
 // ============================================================
-const int PWM_CHANNEL = 0;
-const int PWM_FREQ = 5000;
-const int PWM_RESOLUTION = 8;
-const int PWM_MAX = 180;
+constexpr int PWM_CHANNEL    = 0;
+constexpr int PWM_FREQ       = 5000;
+constexpr int PWM_RESOLUTION = 8;
+constexpr int PWM_MAX        = 180;
 
 // ============================================================
 // Encoder / gearbox configuration
 // ============================================================
 // IMPORTANT:
 // Change this if you install a different gearbox.
-const float GEAR_RATIO = 20.4;
+constexpr float GEAR_RATIO = 20.4f;
 
 // Example for lower-ratio motor:
-// const float GEAR_RATIO = 4.4;
+// constexpr float GEAR_RATIO = 4.4f;
 
 // Full-quadrature encoder counts per motor revolution.
 // Keep this consistent with your Week 4 convention.
-const float ENCODER_COUNTS_MOTOR_REV = 48.0;
-
-const float COUNTS_PER_OUTPUT_REV =
-  ENCODER_COUNTS_MOTOR_REV * GEAR_RATIO;
+constexpr float ENCODER_COUNTS_MOTOR_REV = 48.0f;
 
 // On this rig the encoder counts DOWN for positive PWM
 // (Week 4: +232 PWM -> -16 counts). Flip it so positive PWM
 // gives positive angle; otherwise the P loop is positive
 // feedback and drives the shaft away from the reference.
-const int ENCODER_DIRECTION = -1;
+constexpr int ENCODER_DIRECTION = -1;
+
+// Output-shaft degrees per encoder count (direction included)
+constexpr float DEG_PER_COUNT =
+  ENCODER_DIRECTION * 360.0f / (ENCODER_COUNTS_MOTOR_REV * GEAR_RATIO);
 
 // ============================================================
 // Controller
 // ============================================================
 // CHANGE THIS FOR EACH EXPERIMENT
-float Kp = 10;
+constexpr float Kp = 10.0f;
 
 // Week 5: P control only
-const float Ki = 0.0;
-const float Kd = 0.0;
+constexpr float Ki = 0.0f;
+constexpr float Kd = 0.0f;
 
 // TARGET ANGLE (deg) -- measured from wherever the output shaft
-// is sitting when you press 's' (encoder is zeroed at start)
-const float REFERENCE_DEG = 45.0;
+// is sitting when the trial starts (encoder is zeroed at start)
+constexpr float REFERENCE_DEG = 45.0f;
 
 // ============================================================
 // Sampling
 // ============================================================
 // 5000 us = 0.005 s = 200 Hz
-const unsigned long SAMPLE_PERIOD_US = 5000;
+constexpr unsigned long SAMPLE_PERIOD_US = 5000;
 
 // Baseline logged with the motor OFF before the step.
 // The step (motor on) happens at time_s = 0, so baseline
-// rows have negative time. Keep a multiple of SAMPLE_PERIOD_US
-// so the step lands exactly on a sample.
+// rows have negative time.
 // 500000 us = 0.5 s = 100 samples
-const unsigned long PRE_STEP_US = 500000;
+constexpr unsigned long PRE_STEP_US = 500000;
 
 // Increase if more time is required to settle
 // (measured from the step)
-const float TRIAL_DURATION_S = 15.0;
+constexpr float TRIAL_DURATION_S = 15.0f;
+constexpr long TRIAL_DURATION_US = (long)(TRIAL_DURATION_S * 1000000.0);
 
-// Keep logging with the motor OFF after the trial ends
+// Keep logging with the motor OFF after the motor stops
 // (auto stop or 'x') so the shaft coming to rest is captured.
 // END is printed once this has elapsed.
 // 1000000 us = 1 s = 200 samples
-const unsigned long POST_STOP_US = 1000000;
+constexpr unsigned long POST_STOP_US = 1000000;
+
+static_assert(PRE_STEP_US % SAMPLE_PERIOD_US == 0,
+              "PRE_STEP_US must be a multiple of SAMPLE_PERIOD_US so the step lands on a sample");
+static_assert(POST_STOP_US >= SAMPLE_PERIOD_US,
+              "POST_STOP_US must cover at least one sample");
 
 // ============================================================
-// Experiment variables
+// Serial stream (read by log_trial.m)
 // ============================================================
-bool running = false;
+//   READY                    once at boot
+//   time_s,...,pwm           CSV header, trial started
+//   <rows>                   motor off, time_s < 0
+//   MOTOR_ON                 next row is the first with the motor on (time_s = 0)
+//   <rows>
+//   MOTOR_OFF                next row is the first with the motor off
+//   <rows>                   motor off for POST_STOP_US
+//   END                      logging stopped
+//
+// Serial commands (single key, Enter not needed):
+//   s = start, x = stop
+
+// ============================================================
+// Experiment state
+// ============================================================
+enum class Phase { Idle, PreStep, Control, PostStop };
+
+Phase phase = Phase::Idle;
 unsigned long trialStartUs = 0;
 unsigned long lastSampleUs = 0;
-
-// true once the motor has been stopped and the post-stop
-// rows are being logged
-bool motorStopped = false;
 unsigned long postStopSamplesLeft = 0;
 
 // ============================================================
-// Motor command
+// Motor command (returns the PWM actually applied)
 // ============================================================
-void setMotor(int pwm)
+int setMotor(int pwm)
 {
   pwm = constrain(pwm, -PWM_MAX, PWM_MAX);
 
-  if (pwm > 0)
-  {
-    digitalWrite(MOTOR_INA, HIGH);
-    digitalWrite(MOTOR_INB, LOW);
-    ledcWrite(PWM_CHANNEL, pwm);
-  }
-  else if (pwm < 0)
-  {
-    digitalWrite(MOTOR_INA, LOW);
-    digitalWrite(MOTOR_INB, HIGH);
-    ledcWrite(PWM_CHANNEL, -pwm);
-  }
-  else
-  {
-    digitalWrite(MOTOR_INA, LOW);
-    digitalWrite(MOTOR_INB, LOW);
-    ledcWrite(PWM_CHANNEL, 0);
-  }
+  // pwm = 0 -> INA = INB = LOW (brake)
+  digitalWrite(MOTOR_INA, pwm > 0);
+  digitalWrite(MOTOR_INB, pwm < 0);
+  ledcWrite(PWM_CHANNEL, abs(pwm));
+
+  return pwm;
 }
 
 // ============================================================
-// End experiment (logging stops)
+// Trial control
 // ============================================================
+void startTrial()
+{
+  // Current position becomes 0 degrees
+  encoder.clearCount();
+
+  trialStartUs = micros();
+
+  // Back-date by one period so the first sample is taken
+  // immediately, while the motor is still off
+  lastSampleUs = trialStartUs - SAMPLE_PERIOD_US;
+
+  phase = Phase::PreStep;
+  Serial.println("time_s,reference_deg,angle_deg,error_deg,u_raw,pwm");
+}
+
+// Motor off, logging continues for POST_STOP_US
+void stopMotor()
+{
+  setMotor(0);
+  phase = Phase::PostStop;
+  postStopSamplesLeft = POST_STOP_US / SAMPLE_PERIOD_US;
+  Serial.println("MOTOR_OFF");
+}
+
+// Motor off, logging stops
 void endTrial()
 {
   setMotor(0);
-  running = false;
-  motorStopped = false;
+  phase = Phase::Idle;
   Serial.println("END");
-}
-
-// ============================================================
-// Stop motor (logging continues for POST_STOP_US)
-// ============================================================
-void stopTrial()
-{
-  setMotor(0);
-  motorStopped = true;
-  postStopSamplesLeft = POST_STOP_US / SAMPLE_PERIOD_US;
-
-  if (postStopSamplesLeft == 0)
-  {
-    endTrial();
-  }
 }
 
 // ============================================================
@@ -153,6 +169,16 @@ void setup()
 {
   Serial.begin(115200);
 
+  pinMode(MOTOR_INA, OUTPUT);
+  pinMode(MOTOR_INB, OUTPUT);
+  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(MOTOR_PWM, PWM_CHANNEL);
+  setMotor(0);
+
+  // Hardware full-quadrature counter, same as the Week 4 code
+  ESP32Encoder::useInternalWeakPullResistors = puType::up;
+  encoder.attachFullQuad(ENCODER_A, ENCODER_B);
+
   // Let the USB-serial link settle after reset, then throw away
   // any junk bytes that arrived during boot so they can't be
   // mistaken for a command
@@ -161,30 +187,8 @@ void setup()
   {
     Serial.read();
   }
-  Serial.println();
 
-  // Hardware full-quadrature counter, same as the Week 4 code
-  ESP32Encoder::useInternalWeakPullResistors = puType::up;
-  encoder.attachFullQuad(ENCODER_A, ENCODER_B);
-  encoder.clearCount();
-
-  pinMode(MOTOR_INA, OUTPUT);
-  pinMode(MOTOR_INB, OUTPUT);
-
-  ledcSetup(
-    PWM_CHANNEL,
-    PWM_FREQ,
-    PWM_RESOLUTION
-  );
-
-  ledcAttachPin(
-    MOTOR_PWM,
-    PWM_CHANNEL
-  );
-
-  setMotor(0);
-
-  Serial.println("READY - press s to start, x to stop");
+  Serial.println("READY");
 }
 
 // ============================================================
@@ -193,55 +197,34 @@ void setup()
 void loop()
 {
   // --------------------------------------------------------
-  // Serial commands (single key, Enter not needed)
-  //   s = start, x = stop
+  // Serial commands
   // --------------------------------------------------------
   while (Serial.available())
   {
-    char c = Serial.read();
-
-    if ((c == 's' || c == 'S')
-        && !running)
+    switch (tolower(Serial.read()))
     {
-      // Current equilibrium becomes 0 degrees
-      encoder.clearCount();
+      case 's':
+        if (phase == Phase::Idle)
+        {
+          startTrial();
+        }
+        break;
 
-      trialStartUs = micros();
-
-      // Back-date by one period so the first sample is taken
-      // immediately, while the motor is still off
-      lastSampleUs = trialStartUs - SAMPLE_PERIOD_US;
-
-      running = true;
-
-      Serial.println(
-        "time_s,reference_deg,angle_deg,"
-        "error_deg,u_raw,pwm"
-      );
-    }
-
-    else if ((c == 'x' || c == 'X')
-             && running && !motorStopped)
-    {
-      stopTrial();
+      case 'x':
+        if (phase == Phase::PreStep)
+        {
+          endTrial();   // motor never turned on, nothing to log
+        }
+        else if (phase == Phase::Control)
+        {
+          stopMotor();
+        }
+        break;
     }
   }
 
-  // --------------------------------------------------------
-  // Motor off while waiting
-  // --------------------------------------------------------
-  if (!running)
+  if (phase == Phase::Idle)
   {
-    setMotor(0);
-
-    // Re-print the prompt so the monitor shows readable text
-    // even if it connected after the boot banner went out
-    static unsigned long lastPromptMs = 0;
-    if (millis() - lastPromptMs >= 2000)
-    {
-      lastPromptMs = millis();
-      Serial.println("READY - press s to start, x to stop");
-    }
     return;
   }
 
@@ -250,96 +233,59 @@ void loop()
   // --------------------------------------------------------
   unsigned long nowUs = micros();
 
-  if ((unsigned long)(nowUs - lastSampleUs)
-      >= SAMPLE_PERIOD_US)
+  if (nowUs - lastSampleUs < SAMPLE_PERIOD_US)
   {
-    // Fixed grid (no drift): sample k is at k * SAMPLE_PERIOD_US
-    lastSampleUs += SAMPLE_PERIOD_US;
+    return;
+  }
 
-    unsigned long elapsedUs = nowUs - trialStartUs;
+  // Fixed grid (no drift): sample k is at k * SAMPLE_PERIOD_US
+  lastSampleUs += SAMPLE_PERIOD_US;
 
-    // ----------------------------------------------------
-    // Read encoder (before the motor command below, so the
-    // t = 0 row is the angle at the instant the motor turns on)
-    // ----------------------------------------------------
-    int64_t count =
-      ENCODER_DIRECTION * encoder.getCount();
+  // Time relative to the step (negative = before the motor turns on)
+  long tUs = (long)(nowUs - trialStartUs - PRE_STEP_US);
 
-    // ----------------------------------------------------
-    // Convert encoder count to output angle
-    // ----------------------------------------------------
-    float angleDeg =
-      360.0 *
-      ((float)count /
-      COUNTS_PER_OUTPUT_REV);
+  // --------------------------------------------------------
+  // Step on / auto stop, cued just before the first row
+  // they apply to
+  // --------------------------------------------------------
+  if (phase == Phase::PreStep && tUs >= 0)
+  {
+    phase = Phase::Control;
+    Serial.println("MOTOR_ON");
+  }
+  else if (phase == Phase::Control && tUs >= TRIAL_DURATION_US)
+  {
+    stopMotor();
+  }
 
-    // ----------------------------------------------------
-    // Step input: reference is 0 and the motor is held off
-    // until time_s = 0, then it steps to REFERENCE_DEG
-    // ----------------------------------------------------
-    bool stepped =
-      elapsedUs >= PRE_STEP_US;
+  // --------------------------------------------------------
+  // Read encoder (before the motor command below, so the
+  // t = 0 row is the angle at the instant the motor turns on)
+  // --------------------------------------------------------
+  float angleDeg = DEG_PER_COUNT * (float)encoder.getCount();
 
-    float referenceDeg =
-      stepped ? REFERENCE_DEG : 0.0;
+  // Step input: reference is 0 until the motor turns on
+  float referenceDeg = (phase == Phase::PreStep) ? 0.0f : REFERENCE_DEG;
+  float errorDeg = referenceDeg - angleDeg;
 
-    // ----------------------------------------------------
-    // Position error
-    // ----------------------------------------------------
-    float errorDeg =
-      referenceDeg - angleDeg;
+  // P controller (output forced to 0 while the motor is off)
+  float uRaw = (phase == Phase::Control) ? Kp * errorDeg : 0.0f;
+  int pwm = setMotor(lroundf(uRaw));
 
-    // ----------------------------------------------------
-    // P controller (output forced to 0 before the step
-    // and after the motor is stopped)
-    // ----------------------------------------------------
-    float uRaw =
-      (stepped && !motorStopped) ? Kp * errorDeg : 0.0;
+  // --------------------------------------------------------
+  // CSV row in a single write; time_s is formatted from
+  // integer microseconds so it is exact
+  // --------------------------------------------------------
+  unsigned long absUs = (tUs < 0) ? -tUs : tUs;
+  Serial.printf("%s%lu.%06lu,%.3f,%.3f,%.3f,%.3f,%d\r\n",
+                (tUs < 0) ? "-" : "", absUs / 1000000, absUs % 1000000,
+                referenceDeg, angleDeg, errorDeg, uRaw, pwm);
 
-    int pwmCommand =
-      constrain(
-        (int)round(uRaw),
-        -PWM_MAX,
-        PWM_MAX
-      );
-
-    setMotor(pwmCommand);
-
-    // ----------------------------------------------------
-    // Time relative to the step (negative = motor still off)
-    // ----------------------------------------------------
-    float timeSec =
-      (long)(elapsedUs - PRE_STEP_US)
-      / 1000000.0;
-
-    // ----------------------------------------------------
-    // Output CSV data
-    // ----------------------------------------------------
-    Serial.print(timeSec, 6);
-    Serial.print(",");
-    Serial.print(referenceDeg, 3);
-    Serial.print(",");
-    Serial.print(angleDeg, 3);
-    Serial.print(",");
-    Serial.print(errorDeg, 3);
-    Serial.print(",");
-    Serial.print(uRaw, 3);
-    Serial.print(",");
-    Serial.println(pwmCommand);
-
-    // ----------------------------------------------------
-    // Automatic stop, then END after the post-stop rows
-    // ----------------------------------------------------
-    if (motorStopped)
-    {
-      if (--postStopSamplesLeft == 0)
-      {
-        endTrial();
-      }
-    }
-    else if (timeSec >= TRIAL_DURATION_S)
-    {
-      stopTrial();
-    }
+  // --------------------------------------------------------
+  // END after the post-stop rows
+  // --------------------------------------------------------
+  if (phase == Phase::PostStop && --postStopSamplesLeft == 0)
+  {
+    endTrial();
   }
 }

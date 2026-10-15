@@ -2,7 +2,8 @@
 %
 % Starts a trial (sends 's'), records every row the firmware streams
 % until END, then saves the window from PRE_S before the motor turns on
-% to POST_S after the shaft has come to rest with the motor off.
+% to POST_S after the shaft has come to rest with the motor off. Motor
+% on/off come from the firmware's MOTOR_ON / MOTOR_OFF cue lines.
 %
 % Close the PlatformIO serial monitor first: only one program can have
 % the port open. If a run is interrupted (Ctrl+C), just run it again;
@@ -43,23 +44,29 @@ setDTR(s, false);
 setRTS(s, false);
 
 %% Start the trial
-% Send 's' on every READY prompt until the CSV header comes back. READY is
-% printed every 2 s while idle, so a missed 's' (board still booting) is
-% retried, and an extra 's' after the trial starts is ignored by the firmware.
+% Send 's' every 0.5 s until the CSV header comes back. An 's' that arrives
+% while the board is booting is discarded, so it is simply retried, and an
+% extra 's' after the trial starts is ignored by the firmware.
 fprintf("Waiting for ESP32 on %s...\n", PORT);
 waitStart = tic;
+nextSend  = 0;
 headerLine = "";
 while headerLine == ""
-    if toc(waitStart) > 10
+    elapsed = toc(waitStart);
+    if elapsed > 10
         clear s
         error("No response from the ESP32 on %s. Is the firmware uploaded and the serial monitor closed?", PORT);
     end
-    line = readline(s);
-    if isempty(line)
-        continue
-    elseif contains(line, "READY")
+    if elapsed >= nextSend
         write(s, "s", "char");
-    elseif startsWith(line, "time_s")
+        nextSend = elapsed + 0.5;
+    end
+    if s.NumBytesAvailable == 0
+        pause(0.01);
+        continue
+    end
+    line = readline(s);
+    if ~isempty(line) && startsWith(line, "time_s")
         headerLine = line;
     end
 end
@@ -69,6 +76,8 @@ header = split(headerLine, ",")';
 nCol = numel(header);
 raw  = strings(0, 1);     % rows exactly as the ESP32 printed them
 data = zeros(0, nCol);
+iOn  = [];                % first row with the motor on  (after MOTOR_ON)
+iOff = [];                % first row with the motor off (after MOTOR_OFF)
 
 fprintf("Recording, t = ");
 lastSec = -1;
@@ -77,9 +86,14 @@ while true
     if isempty(line)
         warning("Serial stream stopped before END; keeping what was received.");
         break
-    end
-    if startsWith(line, "END")
+    elseif startsWith(line, "END")
         break
+    elseif startsWith(line, "MOTOR_ON")
+        iOn = numel(raw) + 1;
+        continue
+    elseif startsWith(line, "MOTOR_OFF")
+        iOff = numel(raw) + 1;
+        continue
     end
 
     v = sscanf(line, "%f,")';
@@ -105,19 +119,17 @@ end
 T   = array2table(data, "VariableNames", header);
 t   = T.time_s;
 ang = T.angle_deg;
-pwm = T.pwm;
 
-iOn = find(pwm ~= 0, 1);
-if isempty(iOn)
-    error("The motor never turned on (pwm = 0 in every row).");
+if isempty(iOn) || iOn > numel(t)
+    error("No MOTOR_ON cue before the last row, so there is no motor-on data. " + ...
+          "Is the current src/main.cpp uploaded?");
 end
 
-% Motor off = first row after which pwm stays at 0
-iOff  = find(pwm ~= 0, 1, "last") + 1;
 iRest = [];
-if iOff > numel(t)
-    warning("Motor was still on in the last row, so there is no motor-off data. " + ...
-            "Upload the current src/main.cpp (it logs POST_STOP_US with the motor off).");
+if isempty(iOff) || iOff > numel(t)
+    iOff = [];
+    warning("No MOTOR_OFF cue before the last row, so there is no motor-off data; " + ...
+            "keeping all data after motor on.");
 else
     % At rest = first row after motor off where the angle then stays
     % within STILL_DEG for STILL_S
@@ -159,7 +171,7 @@ fprintf(fid, "%s\n", raw(keep));
 fclose(fid);
 
 fprintf("Motor on at %.3f s", t(iOn));
-if iOff <= numel(t)
+if ~isempty(iOff)
     fprintf(", off at %.3f s", t(iOff));
 end
 if ~isempty(iRest)
