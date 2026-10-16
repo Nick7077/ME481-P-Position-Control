@@ -19,7 +19,7 @@ constexpr int ENCODER_B = 27;
 constexpr int PWM_CHANNEL    = 0;
 constexpr int PWM_FREQ       = 5000;
 constexpr int PWM_RESOLUTION = 8;
-constexpr int PWM_MAX        = 180;
+constexpr int PWM_MAX        = 250;
 
 // ============================================================
 // Encoder / gearbox configuration
@@ -49,7 +49,7 @@ constexpr float DEG_PER_COUNT =
 // Controller
 // ============================================================
 // CHANGE THIS FOR EACH EXPERIMENT
-constexpr float Kp = 10.0f;
+constexpr float Kp = 20.0f;
 
 // Week 5: P control only
 constexpr float Ki = 0.0f;
@@ -57,7 +57,7 @@ constexpr float Kd = 0.0f;
 
 // TARGET ANGLE (deg) -- measured from wherever the output shaft
 // is sitting when the trial starts (encoder is zeroed at start)
-constexpr float REFERENCE_DEG = 45.0f;
+constexpr float REFERENCE_DEG = 100.0f;
 
 // ============================================================
 // Sampling
