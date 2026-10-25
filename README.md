@@ -7,7 +7,7 @@ ESP32 PlatformIO project for proportional (P) position control of the gearmotor 
 - **Motor Driver**: VNH5019
   - INA: GPIO 15
   - INB: GPIO 2
-  - PWM: GPIO 17 (5 kHz, 8-bit, limited to 180)
+  - PWM: GPIO 21 (5 kHz, 8-bit, limited to 180)
   - CS (Current Sense): GPIO 32 (ADC1_CH4, ~140 mV/A; not used by the P controller)
 - **Quadrature Encoder**:
   - Phase A: GPIO 14

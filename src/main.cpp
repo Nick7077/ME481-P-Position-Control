@@ -8,7 +8,7 @@ ESP32Encoder encoder;
 // ============================================================
 constexpr int MOTOR_INA = 15;
 constexpr int MOTOR_INB = 2;
-constexpr int MOTOR_PWM = 17;
+constexpr int MOTOR_PWM = 21;
 constexpr int MOTOR_CS  = 32;   // VNH5019 current-sense output -> ADC1_CH4 (unused by P control)
 constexpr int ENCODER_A = 14;
 constexpr int ENCODER_B = 27;
@@ -19,27 +19,27 @@ constexpr int ENCODER_B = 27;
 constexpr int PWM_CHANNEL    = 0;
 constexpr int PWM_FREQ       = 5000;
 constexpr int PWM_RESOLUTION = 8;
-constexpr int PWM_MAX        = 250;
+constexpr int PWM_MAX        = 200;
 
 // ============================================================
 // Encoder / gearbox configuration
 // ============================================================
 // IMPORTANT:
 // Change this if you install a different gearbox.
-constexpr float GEAR_RATIO = 20.4f;
+constexpr float GEAR_RATIO = 102.08f;
 
 // Example for lower-ratio motor:
 // constexpr float GEAR_RATIO = 4.4f;
 
 // Full-quadrature encoder counts per motor revolution.
 // Keep this consistent with your Week 4 convention.
-constexpr float ENCODER_COUNTS_MOTOR_REV = 48.0f;
+constexpr float ENCODER_COUNTS_MOTOR_REV = 64.0f;
 
 // On this rig the encoder counts DOWN for positive PWM
 // (Week 4: +232 PWM -> -16 counts). Flip it so positive PWM
 // gives positive angle; otherwise the P loop is positive
 // feedback and drives the shaft away from the reference.
-constexpr int ENCODER_DIRECTION = -1;
+constexpr int ENCODER_DIRECTION = 1;
 
 // Output-shaft degrees per encoder count (direction included)
 constexpr float DEG_PER_COUNT =
@@ -49,7 +49,7 @@ constexpr float DEG_PER_COUNT =
 // Controller
 // ============================================================
 // CHANGE THIS FOR EACH EXPERIMENT
-constexpr float Kp = 20.0f;
+constexpr float Kp = 0.8f; //kp=135 oscillation
 
 // Week 5: P control only
 constexpr float Ki = 0.0f;
@@ -57,7 +57,7 @@ constexpr float Kd = 0.0f;
 
 // TARGET ANGLE (deg) -- measured from wherever the output shaft
 // is sitting when the trial starts (encoder is zeroed at start)
-constexpr float REFERENCE_DEG = 100.0f;
+constexpr float REFERENCE_DEG = 90.0f;
 
 // ============================================================
 // Sampling
@@ -73,14 +73,14 @@ constexpr unsigned long PRE_STEP_US = 500000;
 
 // Increase if more time is required to settle
 // (measured from the step)
-constexpr float TRIAL_DURATION_S = 15.0f;
+constexpr float TRIAL_DURATION_S = 3.0f;
 constexpr long TRIAL_DURATION_US = (long)(TRIAL_DURATION_S * 1000000.0);
 
 // Keep logging with the motor OFF after the motor stops
 // (auto stop or 'x') so the shaft coming to rest is captured.
 // END is printed once this has elapsed.
-// 1000000 us = 1 s = 200 samples
-constexpr unsigned long POST_STOP_US = 1000000;
+// 3000000 us = 3 s = 600 samples
+constexpr unsigned long POST_STOP_US = 3000000;
 
 static_assert(PRE_STEP_US % SAMPLE_PERIOD_US == 0,
               "PRE_STEP_US must be a multiple of SAMPLE_PERIOD_US so the step lands on a sample");
@@ -269,7 +269,7 @@ void loop()
   float errorDeg = referenceDeg - angleDeg;
 
   // P controller (output forced to 0 while the motor is off)
-  float uRaw = (phase == Phase::Control) ? Kp * errorDeg : 0.0f;
+  float uRaw = (phase == Phase::Control) ? Kp * errorDeg / 3.3 * 255.0f : 0.0f;
   int pwm = setMotor(lroundf(uRaw));
 
   // --------------------------------------------------------
