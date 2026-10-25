@@ -7,11 +7,14 @@ ESP32 PlatformIO project for proportional (P) position control of the gearmotor 
 - **Motor Driver**: VNH5019
   - INA: GPIO 15
   - INB: GPIO 2
-  - PWM: GPIO 21 (5 kHz, 8-bit, limited to 180)
+  - PWM: GPIO 21 (5 kHz, 8-bit, limited to 200)
   - CS (Current Sense): GPIO 32 (ADC1_CH4, ~140 mV/A; not used by the P controller)
+- **Gearmotor**: 102.08:1 gearbox (`GEAR_RATIO`)
 - **Quadrature Encoder**:
   - Phase A: GPIO 14
   - Phase B: GPIO 27
+  - 64 counts per motor revolution, full quadrature (`ENCODER_COUNTS_MOTOR_REV`), so about 0.055 degrees per count at the output shaft
+  - Counts up for positive PWM (`ENCODER_DIRECTION = 1`)
 
 ## Getting Started
 
@@ -32,10 +35,10 @@ pio device monitor --baud 115200
 
 ### Usage
 1. Open the Serial Monitor at 115200 baud. `READY` is printed once at boot.
-2. Press `s` to begin a trial. The current shaft position becomes 0 degrees. The encoder is logged with the motor off for `PRE_STEP_US` (0.5 s), then at `time_s = 0` the reference steps to `REFERENCE_DEG` (45 degrees) and the controller turns on. Baseline rows have negative time.
+2. Press `s` to begin a trial. The current shaft position becomes 0 degrees. The encoder is logged with the motor off for `PRE_STEP_US` (0.5 s), then at `time_s = 0` the reference steps to `REFERENCE_DEG` (90 degrees) and the controller turns on. Baseline rows have negative time.
 3. The serial monitor streams `time_s,reference_deg,angle_deg,error_deg,u_raw,pwm` at 200 Hz. Every line is also saved to `logs/device-monitor-*.log` (the `log2file` monitor filter), since a full run is longer than the VS Code terminal scrollback.
-4. The motor stops automatically `TRIAL_DURATION_S` (15 s) after the step, or press `x` to stop it early (`x` before the step aborts the trial). Logging continues with the motor off for `POST_STOP_US` (1 s, `pwm` = 0) so the shaft coming to rest is captured, then `END` is printed.
-5. Change `Kp` in `src/main.cpp` for each experiment.
+4. The motor stops automatically `TRIAL_DURATION_S` (3 s) after the step, or press `x` to stop it early (`x` before the step aborts the trial). Logging continues with the motor off for `POST_STOP_US` (3 s, `pwm` = 0) so the shaft coming to rest is captured, then `END` is printed.
+5. Change `Kp` in `src/main.cpp` for each experiment. `Kp` is in volts per degree: the controller output is converted to PWM counts as `u_raw = Kp * error_deg * 255 / 3.3` (255 counts = 3.3 V), then clamped to ±200 to give `pwm`.
 
 The stream contains only the CSV header, data rows, and these cue lines:
 
@@ -49,4 +52,4 @@ The stream contains only the CSV header, data rows, and these cue lines:
 ### Logging to CSV with MATLAB
 1. Close the PlatformIO serial monitor (only one program can have the port open).
 2. Run `log_trial.m`. It finds the ESP32 port, starts a trial, and records until `END`, using the `MOTOR_ON` / `MOTOR_OFF` cues to find when the motor turned on and off.
-3. It saves `data/trial_<date>_<time>.csv`, trimmed from `PRE_S` (0.25 s) before the motor turns on to `POST_S` (0.5 s) after the shaft has come to rest with the motor off. Set `NAME_TAG` (e.g. `"Kp10"`) to label the file. The trimmed data is also left in the workspace as the table `trial`.
+3. It saves `data/trial_<date>_<time>.csv`, trimmed from `PRE_S` (0.25 s) before the motor turns on to `POST_S` (6 s) after the shaft has come to rest with the motor off. `POST_S` is longer than the firmware's 3 s of post-stop logging, so in practice the file runs to `END`. Set `NAME_TAG` (e.g. `"Kp10"`) to label the file. The trimmed data is also left in the workspace as the table `trial`.

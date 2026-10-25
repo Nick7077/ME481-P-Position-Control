@@ -15,9 +15,9 @@ clear s
 PORT      = "";       % "" = auto-detect, or e.g. "/dev/cu.usbserial-0001" / "COM3"
 BAUD      = 115200;   % must match Serial.begin() in src/main.cpp
 PRE_S     = 0.25;     % keep this long before the motor turns on (firmware logs 0.5 s)
-POST_S    = 6;      % keep this long after the shaft comes to rest
+POST_S    = 6;        % keep this long after the shaft comes to rest (firmware logs 3 s after motor off)
 STILL_DEG = 0.5;      % shaft is at rest once the angle moves less than this
-STILL_S   = 0.25;     % ... for this long (one encoder count = 0.37 deg at 20.4:1)
+STILL_S   = 0.25;     % ... for this long (one encoder count = 0.055 deg at 102.08:1)
 NAME_TAG  = "";       % added to the file name, e.g. "Kp10"
 OUT_DIR   = fullfile(fileparts(mfilename("fullpath")), "data");
 

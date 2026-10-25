@@ -35,9 +35,10 @@ constexpr float GEAR_RATIO = 102.08f;
 // Keep this consistent with your Week 4 convention.
 constexpr float ENCODER_COUNTS_MOTOR_REV = 64.0f;
 
-// On this rig the encoder counts DOWN for positive PWM
-// (Week 4: +232 PWM -> -16 counts). Flip it so positive PWM
-// gives positive angle; otherwise the P loop is positive
+// On this rig (102.08:1 motor) the encoder counts UP for
+// positive PWM, so no flip is needed. Set this to -1 for a
+// motor that counts DOWN for positive PWM (the Week 4 motor:
+// +232 PWM -> -16 counts); otherwise the P loop is positive
 // feedback and drives the shaft away from the reference.
 constexpr int ENCODER_DIRECTION = 1;
 
@@ -49,6 +50,8 @@ constexpr float DEG_PER_COUNT =
 // Controller
 // ============================================================
 // CHANGE THIS FOR EACH EXPERIMENT
+// Units: V/deg. The output is converted to PWM counts with
+// 255 counts = 3.3 V (see the P controller in loop()).
 constexpr float Kp = 0.8f; //kp=135 oscillation
 
 // Week 5: P control only
@@ -268,7 +271,8 @@ void loop()
   float referenceDeg = (phase == Phase::PreStep) ? 0.0f : REFERENCE_DEG;
   float errorDeg = referenceDeg - angleDeg;
 
-  // P controller (output forced to 0 while the motor is off)
+  // P controller in volts, scaled to PWM counts (255 = 3.3 V);
+  // output forced to 0 while the motor is off
   float uRaw = (phase == Phase::Control) ? Kp * errorDeg / 3.3 * 255.0f : 0.0f;
   int pwm = setMotor(lroundf(uRaw));
 
