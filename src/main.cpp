@@ -54,9 +54,12 @@ constexpr float DEG_PER_COUNT =
 // 255 counts = 3.3 V (see the P controller in loop()).
 constexpr float Kp = 0.8f; //kp=135 oscillation
 
-// Week 5: P control only
-constexpr float Ki = 0.0f;
-constexpr float Kd = 0.0f;
+// Units: V/(deg*s), applied to the integral of the error
+constexpr float Ki = 6.0f;
+constexpr float Kd = 0.0f;   // not used yet
+
+// Controller output (V) -> PWM counts
+constexpr float PWM_PER_VOLT = 255.0f / 3.3f;
 
 // TARGET ANGLE (deg) -- measured from wherever the output shaft
 // is sitting when the trial starts (encoder is zeroed at start)
@@ -67,6 +70,7 @@ constexpr float REFERENCE_DEG = 90.0f;
 // ============================================================
 // 5000 us = 0.005 s = 200 Hz
 constexpr unsigned long SAMPLE_PERIOD_US = 5000;
+constexpr float SAMPLE_PERIOD_S = SAMPLE_PERIOD_US / 1000000.0f;
 
 // Baseline logged with the motor OFF before the step.
 // The step (motor on) happens at time_s = 0, so baseline
@@ -114,6 +118,7 @@ Phase phase = Phase::Idle;
 unsigned long trialStartUs = 0;
 unsigned long lastSampleUs = 0;
 unsigned long postStopSamplesLeft = 0;
+float errorIntegral = 0.0f;   // deg*s, reset at the start of each trial
 
 // ============================================================
 // Motor command (returns the PWM actually applied)
@@ -137,6 +142,7 @@ void startTrial()
 {
   // Current position becomes 0 degrees
   encoder.clearCount();
+  errorIntegral = 0.0f;
 
   trialStartUs = micros();
 
@@ -271,9 +277,22 @@ void loop()
   float referenceDeg = (phase == Phase::PreStep) ? 0.0f : REFERENCE_DEG;
   float errorDeg = referenceDeg - angleDeg;
 
-  // P controller in volts, scaled to PWM counts (255 = 3.3 V);
+  // PI controller in volts, scaled to PWM counts (255 = 3.3 V);
   // output forced to 0 while the motor is off
-  float uRaw = (phase == Phase::Control) ? Kp * errorDeg / 3.3 * 255.0f : 0.0f;
+  float uRaw = 0.0f;
+  if (phase == Phase::Control)
+  {
+    // Anti-windup: don't integrate while the output is saturated
+    // and the error would drive it further into saturation
+    float uPrev = (Kp * errorDeg + Ki * errorIntegral) * PWM_PER_VOLT;
+    bool saturated = fabsf(uPrev) >= PWM_MAX;
+    if (!saturated || (uPrev > 0.0f) != (errorDeg > 0.0f))
+    {
+      errorIntegral += errorDeg * SAMPLE_PERIOD_S;
+    }
+
+    uRaw = (Kp * errorDeg + Ki * errorIntegral) * PWM_PER_VOLT;
+  }
   int pwm = setMotor(lroundf(uRaw));
 
   // --------------------------------------------------------
