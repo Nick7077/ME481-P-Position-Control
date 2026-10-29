@@ -18,7 +18,7 @@ PRE_S     = 0.25;     % keep this long before the motor turns on (firmware logs 
 POST_S    = 6;        % keep this long after the shaft comes to rest (firmware logs 3 s after motor off)
 STILL_DEG = 0.5;      % shaft is at rest once the angle moves less than this
 STILL_S   = 0.25;     % ... for this long (one encoder count = 0.055 deg at 102.08:1)
-NAME_TAG  = "ki=6";       % added to the file name, e.g. "Kp10"
+NAME_TAG  = "kd=0.2";       % added to the file name, e.g. "Kp10"
 OUT_DIR   = fullfile(fileparts(mfilename("fullpath")), "data");
 
 %% Open the port

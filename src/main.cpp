@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include <ESP32Encoder.h>
 
+// ME 481 Week 9: dual-core PID, Arduino-ESP32 core 2.x
+// Core 1: 200 Hz control task. Core 0: CSV logging and serial commands.
+// Change only Kd between trials; retain the Week 8 Kp and Ki.
+
 ESP32Encoder encoder;
 
 // ============================================================
@@ -9,7 +13,7 @@ ESP32Encoder encoder;
 constexpr int MOTOR_INA = 15;
 constexpr int MOTOR_INB = 2;
 constexpr int MOTOR_PWM = 21;
-constexpr int MOTOR_CS  = 32;   // VNH5019 current-sense output -> ADC1_CH4 (unused by P control)
+constexpr int MOTOR_CS  = 32;   // VNH5019 current-sense output -> ADC1_CH4 (unused by the controller)
 constexpr int ENCODER_A = 14;
 constexpr int ENCODER_B = 27;
 
@@ -26,7 +30,7 @@ constexpr int PWM_MAX        = 200;
 // ============================================================
 // IMPORTANT:
 // Change this if you install a different gearbox.
-constexpr float GEAR_RATIO = 102.08f;
+constexpr float GEAR_RATIO = 150.0f;
 
 // Example for lower-ratio motor:
 // constexpr float GEAR_RATIO = 4.4f;
@@ -38,7 +42,7 @@ constexpr float ENCODER_COUNTS_MOTOR_REV = 64.0f;
 // On this rig (102.08:1 motor) the encoder counts UP for
 // positive PWM, so no flip is needed. Set this to -1 for a
 // motor that counts DOWN for positive PWM (the Week 4 motor:
-// +232 PWM -> -16 counts); otherwise the P loop is positive
+// +232 PWM -> -16 counts); otherwise the loop is positive
 // feedback and drives the shaft away from the reference.
 constexpr int ENCODER_DIRECTION = 1;
 
@@ -49,21 +53,37 @@ constexpr float DEG_PER_COUNT =
 // ============================================================
 // Controller
 // ============================================================
-// CHANGE THIS FOR EACH EXPERIMENT
-// Units: V/deg. The output is converted to PWM counts with
-// 255 counts = 3.3 V (see the P controller in loop()).
+//   u = Kp*e + Ki*integral(e) - Kd*filtered d(angle)/dt
+// in volts, converted to PWM counts with 255 counts = 3.3 V
+// (see controlTask()).
+
+// Units: V/deg
 constexpr float Kp = 0.8f; //kp=135 oscillation
 
 // Units: V/(deg*s), applied to the integral of the error
-constexpr float Ki = 6.0f;
-constexpr float Kd = 0.0f;   // not used yet
+constexpr float Ki = 3.6f;
+
+// CHANGE THIS FOR EACH EXPERIMENT
+// Units: V/(deg/s) = V*s/deg, applied to the filtered measured
+// velocity (derivative on measurement, so no derivative kick)
+constexpr float Kd = 0.2f;
 
 // Controller output (V) -> PWM counts
 constexpr float PWM_PER_VOLT = 255.0f / 3.3f;
 
+// Velocity filter: first-order low-pass (exponential moving
+// average) on the backward-difference velocity,
+//   vf = ALPHA*v + (1 - ALPHA)*vf
+// At 200 Hz, ALPHA = 0.20 is a time constant of about 22 ms
+// (about 7 Hz cutoff). Smaller ALPHA = more filtering, more lag.
+constexpr float ALPHA = 0.20f;
+
+// Clamp on the error integral (deg*s)
+constexpr float INTEGRAL_LIMIT = 300.0f;
+
 // TARGET ANGLE (deg) -- measured from wherever the output shaft
 // is sitting when the trial starts (encoder is zeroed at start)
-constexpr float REFERENCE_DEG = 90.0f;
+constexpr float REFERENCE_DEG = 45.0f;
 
 // ============================================================
 // Sampling
@@ -104,26 +124,45 @@ static_assert(POST_STOP_US >= SAMPLE_PERIOD_US,
 //   <rows>
 //   MOTOR_OFF                next row is the first with the motor off
 //   <rows>                   motor off for POST_STOP_US
-//   END                      logging stopped
+//   END; dropped_samples=N   logging stopped; N rows were lost because
+//                            the serial link could not keep up
+//
+// If the control task misses a sample deadline it stops the
+// motor and the trial ends early with
+//   # missed a sample deadline, trial aborted
+// just before END.
 //
 // Serial commands (single key, Enter not needed):
 //   s = start, x = stop
 
 // ============================================================
-// Experiment state
+// State shared between the two cores
 // ============================================================
-enum class Phase { Idle, PreStep, Control, PostStop };
+enum class Phase : uint8_t { PreStep, Control, PostStop };
 
-Phase phase = Phase::Idle;
-unsigned long trialStartUs = 0;
-unsigned long lastSampleUs = 0;
-unsigned long postStopSamplesLeft = 0;
-float errorIntegral = 0.0f;   // deg*s, reset at the start of each trial
+// One CSV row, passed from the control task to the logger
+struct Sample
+{
+  long tUs;            // time from the step (negative = before it)
+  float referenceDeg;
+  float angleDeg;
+  float errorDeg;
+  float velocityDps;   // filtered velocity used by the D term
+  float uRaw;          // controller output before the PWM clamp
+  int pwm;
+  Phase phase;
+};
+
+QueueHandle_t logQueue;
+volatile bool running = false;
+volatile bool stopRequested = false;
+volatile bool missedDeadline = false;
+volatile uint32_t droppedSamples = 0;
 
 // ============================================================
-// Motor command (returns the PWM actually applied)
+// Motor command
 // ============================================================
-int setMotor(int pwm)
+void setMotor(int pwm)
 {
   pwm = constrain(pwm, -PWM_MAX, PWM_MAX);
 
@@ -131,44 +170,209 @@ int setMotor(int pwm)
   digitalWrite(MOTOR_INA, pwm > 0);
   digitalWrite(MOTOR_INB, pwm < 0);
   ledcWrite(PWM_CHANNEL, abs(pwm));
-
-  return pwm;
 }
 
 // ============================================================
-// Trial control
+// Control task (core 1, 200 Hz). It never prints: every row
+// goes to the logger through logQueue.
 // ============================================================
-void startTrial()
+void controlTask(void*)
 {
-  // Current position becomes 0 degrees
-  encoder.clearCount();
-  errorIntegral = 0.0f;
+  for (;;)
+  {
+    if (!running)
+    {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
 
-  trialStartUs = micros();
+    // Current position becomes 0 degrees
+    encoder.clearCount();
 
-  // Back-date by one period so the first sample is taken
-  // immediately, while the motor is still off
-  lastSampleUs = trialStartUs - SAMPLE_PERIOD_US;
+    Phase phase = Phase::PreStep;
+    unsigned long postStopSamplesLeft = 0;
+    float integral = 0.0f, filteredVelocity = 0.0f;
+    float previousAngle = DEG_PER_COUNT * (float)encoder.getCount();
 
-  phase = Phase::PreStep;
-  Serial.println("time_s,reference_deg,angle_deg,error_deg,u_raw,pwm");
+    // The first sample is taken immediately; previous is
+    // back-dated one period so its dt is a full period
+    uint32_t start = micros(), next = start, previous = start - SAMPLE_PERIOD_US;
+
+    for (;;)
+    {
+      uint32_t now = micros();
+      if ((int32_t)(now - next) < 0)
+      {
+        taskYIELD();
+        continue;
+      }
+
+      float dt = (uint32_t)(now - previous) * 1e-6f;
+      previous = now;
+
+      // Fixed grid (no drift): sample k is at k * SAMPLE_PERIOD_US
+      next += SAMPLE_PERIOD_US;
+
+      // A missed deadline invalidates a fixed-rate experiment
+      if (dt <= 0.0f || dt > 2.0f * SAMPLE_PERIOD_S)
+      {
+        missedDeadline = true;
+        break;
+      }
+
+      // Time relative to the step (negative = before the motor turns on)
+      long tUs = (long)(now - start) - (long)PRE_STEP_US;
+
+      // ------------------------------------------------------
+      // Step on / stop ('x' or TRIAL_DURATION_S after the step)
+      // ------------------------------------------------------
+      if (phase == Phase::PreStep && stopRequested)
+      {
+        break;   // motor never turned on, nothing to log
+      }
+      if (phase == Phase::PreStep && tUs >= 0)
+      {
+        phase = Phase::Control;
+      }
+      else if (phase == Phase::Control && (stopRequested || tUs >= TRIAL_DURATION_US))
+      {
+        phase = Phase::PostStop;
+        postStopSamplesLeft = POST_STOP_US / SAMPLE_PERIOD_US;
+      }
+
+      // ------------------------------------------------------
+      // Read encoder (before the motor command below, so the
+      // t = 0 row is the angle at the instant the motor turns
+      // on) and update the filtered velocity
+      // ------------------------------------------------------
+      float angle = DEG_PER_COUNT * (float)encoder.getCount();
+      float velocity = (angle - previousAngle) / dt;
+      filteredVelocity = ALPHA * velocity + (1.0f - ALPHA) * filteredVelocity;
+      previousAngle = angle;
+
+      // Step input: reference is 0 until the motor turns on
+      float reference = (phase == Phase::PreStep) ? 0.0f : REFERENCE_DEG;
+      float error = reference - angle;
+
+      // ------------------------------------------------------
+      // PID in volts, scaled to PWM counts (255 = 3.3 V);
+      // output forced to 0 while the motor is off
+      // ------------------------------------------------------
+      float uRaw = 0.0f;
+      if (phase == Phase::Control)
+      {
+        float p = Kp * error, d = -Kd * filteredVelocity;
+        float raw = (p + Ki * integral + d) * PWM_PER_VOLT;
+
+        // Anti-windup (conditional integration): while the output
+        // is saturated, only integrate an error that pulls it back
+        bool high = raw > PWM_MAX, low = raw < -PWM_MAX;
+        bool integrate = (!high && !low) || (high && error < 0) || (low && error > 0);
+        if (Ki != 0.0f && integrate)
+        {
+          integral = constrain(integral + error * dt, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+        }
+
+        uRaw = (p + Ki * integral + d) * PWM_PER_VOLT;
+      }
+      int pwm = constrain((int)lroundf(uRaw), -PWM_MAX, PWM_MAX);
+      setMotor(pwm);
+
+      Sample sample = {tUs, reference, angle, error, filteredVelocity, uRaw, pwm, phase};
+      if (xQueueSend(logQueue, &sample, 0) != pdTRUE)
+      {
+        droppedSamples++;
+      }
+
+      if (phase == Phase::PostStop && --postStopSamplesLeft == 0)
+      {
+        break;
+      }
+    }
+
+    setMotor(0);
+    stopRequested = false;
+    running = false;
+  }
 }
 
-// Motor off, logging continues for POST_STOP_US
-void stopMotor()
+// ============================================================
+// Logger task (core 0): serial commands and CSV output
+// ============================================================
+void loggerTask(void*)
 {
-  setMotor(0);
-  phase = Phase::PostStop;
-  postStopSamplesLeft = POST_STOP_US / SAMPLE_PERIOD_US;
-  Serial.println("MOTOR_OFF");
-}
+  bool wasRunning = false;
+  Phase lastPhase = Phase::PreStep;
 
-// Motor off, logging stops
-void endTrial()
-{
-  setMotor(0);
-  phase = Phase::Idle;
-  Serial.println("END");
+  for (;;)
+  {
+    // --------------------------------------------------------
+    // Serial commands
+    // --------------------------------------------------------
+    if (Serial.available())
+    {
+      char c = tolower(Serial.read());
+
+      // !wasRunning: don't start until the last trial's END is out
+      if (c == 's' && !running && !wasRunning)
+      {
+        xQueueReset(logQueue);
+        droppedSamples = 0;
+        missedDeadline = false;
+        stopRequested = false;
+        lastPhase = Phase::PreStep;
+        Serial.println("time_s,reference_deg,angle_deg,error_deg,velocity_dps,u_raw,pwm");
+        running = true;
+      }
+      else if (c == 'x')
+      {
+        stopRequested = true;
+      }
+    }
+
+    // Read running before draining the queue: the control task
+    // queues its last row before clearing running, so END can't
+    // be printed ahead of any rows
+    bool isRunning = running;
+
+    // --------------------------------------------------------
+    // CSV rows
+    // --------------------------------------------------------
+    Sample sample;
+    while (xQueueReceive(logQueue, &sample, 0) == pdTRUE)
+    {
+      // Motor on/off cues, just before the first row they apply to
+      if (sample.phase != lastPhase)
+      {
+        Serial.println(sample.phase == Phase::Control ? "MOTOR_ON" : "MOTOR_OFF");
+        lastPhase = sample.phase;
+      }
+
+      // Single write per row; time_s is formatted from integer
+      // microseconds so it is exact
+      unsigned long absUs = (sample.tUs < 0) ? -sample.tUs : sample.tUs;
+      Serial.printf("%s%lu.%06lu,%.3f,%.3f,%.3f,%.2f,%.3f,%d\r\n",
+                    (sample.tUs < 0) ? "-" : "", absUs / 1000000, absUs % 1000000,
+                    sample.referenceDeg, sample.angleDeg, sample.errorDeg,
+                    sample.velocityDps, sample.uRaw, sample.pwm);
+    }
+
+    // --------------------------------------------------------
+    // END once the control task has finished and every row
+    // has been printed
+    // --------------------------------------------------------
+    if (wasRunning && !isRunning)
+    {
+      if (missedDeadline)
+      {
+        Serial.println("# missed a sample deadline, trial aborted");
+      }
+      Serial.printf("END; dropped_samples=%lu\r\n", (unsigned long)droppedSamples);
+    }
+    wasRunning = isRunning;
+
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
 }
 
 // ============================================================
@@ -197,118 +401,24 @@ void setup()
     Serial.read();
   }
 
+  // 512 rows = 2.56 s of buffering if the serial link falls behind
+  logQueue = xQueueCreate(512, sizeof(Sample));
+  if (!logQueue)
+  {
+    Serial.println("Queue allocation failed");
+    return;
+  }
+
   Serial.println("READY");
+
+  xTaskCreatePinnedToCore(controlTask, "PID_200Hz", 4096, nullptr, 3, nullptr, 1);
+  xTaskCreatePinnedToCore(loggerTask, "CSV_Logger", 4096, nullptr, 1, nullptr, 0);
 }
 
 // ============================================================
-// Main loop
+// Main loop: all work is done in controlTask and loggerTask
 // ============================================================
 void loop()
 {
-  // --------------------------------------------------------
-  // Serial commands
-  // --------------------------------------------------------
-  while (Serial.available())
-  {
-    switch (tolower(Serial.read()))
-    {
-      case 's':
-        if (phase == Phase::Idle)
-        {
-          startTrial();
-        }
-        break;
-
-      case 'x':
-        if (phase == Phase::PreStep)
-        {
-          endTrial();   // motor never turned on, nothing to log
-        }
-        else if (phase == Phase::Control)
-        {
-          stopMotor();
-        }
-        break;
-    }
-  }
-
-  if (phase == Phase::Idle)
-  {
-    return;
-  }
-
-  // --------------------------------------------------------
-  // Fixed-rate sampling
-  // --------------------------------------------------------
-  unsigned long nowUs = micros();
-
-  if (nowUs - lastSampleUs < SAMPLE_PERIOD_US)
-  {
-    return;
-  }
-
-  // Fixed grid (no drift): sample k is at k * SAMPLE_PERIOD_US
-  lastSampleUs += SAMPLE_PERIOD_US;
-
-  // Time relative to the step (negative = before the motor turns on)
-  long tUs = (long)(nowUs - trialStartUs - PRE_STEP_US);
-
-  // --------------------------------------------------------
-  // Step on / auto stop, cued just before the first row
-  // they apply to
-  // --------------------------------------------------------
-  if (phase == Phase::PreStep && tUs >= 0)
-  {
-    phase = Phase::Control;
-    Serial.println("MOTOR_ON");
-  }
-  else if (phase == Phase::Control && tUs >= TRIAL_DURATION_US)
-  {
-    stopMotor();
-  }
-
-  // --------------------------------------------------------
-  // Read encoder (before the motor command below, so the
-  // t = 0 row is the angle at the instant the motor turns on)
-  // --------------------------------------------------------
-  float angleDeg = DEG_PER_COUNT * (float)encoder.getCount();
-
-  // Step input: reference is 0 until the motor turns on
-  float referenceDeg = (phase == Phase::PreStep) ? 0.0f : REFERENCE_DEG;
-  float errorDeg = referenceDeg - angleDeg;
-
-  // PI controller in volts, scaled to PWM counts (255 = 3.3 V);
-  // output forced to 0 while the motor is off
-  float uRaw = 0.0f;
-  if (phase == Phase::Control)
-  {
-    // Anti-windup: don't integrate while the output is saturated
-    // and the error would drive it further into saturation
-    float uPrev = (Kp * errorDeg + Ki * errorIntegral) * PWM_PER_VOLT;
-    bool saturated = fabsf(uPrev) >= PWM_MAX;
-    if (!saturated || (uPrev > 0.0f) != (errorDeg > 0.0f))
-    {
-      errorIntegral += errorDeg * SAMPLE_PERIOD_S;
-    }
-
-    uRaw = (Kp * errorDeg + Ki * errorIntegral) * PWM_PER_VOLT;
-  }
-  int pwm = setMotor(lroundf(uRaw));
-
-  // --------------------------------------------------------
-  // CSV row in a single write; time_s is formatted from
-  // integer microseconds so it is exact
-  // --------------------------------------------------------
-  unsigned long absUs = (tUs < 0) ? -tUs : tUs;
-  Serial.printf("%s%lu.%06lu,%.3f,%.3f,%.3f,%.3f,%d\r\n",
-                (tUs < 0) ? "-" : "", absUs / 1000000, absUs % 1000000,
-                referenceDeg, angleDeg, errorDeg, uRaw, pwm);
-
-  // --------------------------------------------------------
-  // END after the post-stop rows
-  // --------------------------------------------------------
-  if (phase == Phase::PostStop && --postStopSamplesLeft == 0)
-  {
-    endTrial();
-  }
+  vTaskDelay(pdMS_TO_TICKS(1000));
 }
